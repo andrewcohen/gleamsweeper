@@ -10,6 +10,7 @@ import lustre/element/html
 import lustre/event
 import plinth/javascript/console
 import prng/random
+import sprite
 
 pub fn main() {
   let app = lustre.simple(init, update, view)
@@ -36,14 +37,6 @@ fn fold_over_board(acc, cb) {
   |> list.fold(acc, fn(acc, y) {
     list.range(1, board_size)
     |> list.fold(acc, fn(acc, x) { cb(acc, x, y) })
-  })
-}
-
-fn map_over_board(cb) {
-  list.range(1, board_size)
-  |> list.map(fn(y) {
-    list.range(1, board_size)
-    |> list.map(fn(x) { cb(x, y) })
   })
 }
 
@@ -170,10 +163,6 @@ pub fn view(model: Model) -> Element(Msg) {
   )
 }
 
-const flag_cursor = "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'  width='50' height='60' viewport='0 0 100 100' style='fill:black;font-size:30px;'><text y='50%'>🚩</text></svg>\") 16 0,auto /*!emojicursor.app*/"
-
-const poke_cursor = "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'  width='50' height='60' viewport='0 0 100 100' style='fill:black;font-size:30px;'><text y='50%'>👆</text></svg>\") 16 0,auto /*!emojicursor.app*/"
-
 pub fn render_board(model: Model) {
   let tiles =
     list.range(1, board_size)
@@ -198,12 +187,6 @@ pub fn render_board(model: Model) {
     })
     |> list.flatten()
 
-  // let inner =
-  // map_over_board(fn(x, y) {
-  //   let assert Ok(t) = dict.get(model.board, Coord(x, y))
-  //   render_tile(t)
-  // })
-
   html.div(
     [
       attribute.style([
@@ -218,8 +201,8 @@ pub fn render_board(model: Model) {
         ),
         #("gap", "4px"),
         #("cursor", case model.selected_tool {
-          Flag -> flag_cursor
-          Poke -> poke_cursor
+          Flag -> sprite.flag_cursor
+          Poke -> sprite.poke_cursor
         }),
       ]),
     ],
@@ -239,11 +222,11 @@ pub fn render_toolbar(selected_tool: Tool) {
     case tool {
       Poke ->
         html.button([event.on_click(SelectTool(Poke)), ..classes], [
-          html.text("👆"),
+          html.text(sprite.poke),
         ])
       Flag ->
         html.button([event.on_click(SelectTool(Flag)), ..classes], [
-          html.text("🚩"),
+          html.text(sprite.flag),
         ])
     }
   }
@@ -261,22 +244,16 @@ pub fn render_tile(tile_type: Tile, coord: Coord) -> Element(Msg) {
   let Tile(status, contents) = tile_type
 
   let icon = case status, contents {
-    Unchecked, Bomb(_) -> "💣"
-    Unchecked, Empty(0) | Checked, Empty(0) -> ""
-    Unchecked, Empty(n) | Checked, Empty(n) -> int.to_string(n)
-    Flagged, _ -> "🚩"
-    Checked, Bomb(detonated: True) -> "💥"
-    Checked, Bomb(detonated: False) -> "💣"
+    Unchecked, _ | Checked, Empty(0) -> ""
+    Checked, Empty(n) -> int.to_string(n)
+    Flagged, _ -> sprite.flag
+    Checked, Bomb(detonated: True) -> sprite.boom
+    Checked, Bomb(detonated: False) -> sprite.bomb
   }
 
   let revealed = case status {
     Unchecked -> False
     _ -> True
-  }
-
-  let final_icon = case revealed {
-    True -> icon
-    False -> ""
   }
 
   html.div(
@@ -285,18 +262,9 @@ pub fn render_tile(tile_type: Tile, coord: Coord) -> Element(Msg) {
         "w-12 h-12 border border-gray-400 flex items-center justify-center text-3xl relative",
       ),
       attribute.classes([#("bg-gray-200 hover:bg-gray-300", !revealed)]),
-      attribute.attribute(
-        "data-coord",
-        int.to_string(coord.x) <> "," <> int.to_string(coord.y),
-      ),
       event.on_click(SelectTile(coord)),
     ],
-    [
-      html.text(final_icon),
-      // html.span([attribute.class("text-sm top-0 left-0 absolute")], [
-    //   html.text(coord_to_string(coord)),
-    // ]),
-    ],
+    [html.text(icon)],
   )
 }
 
@@ -332,7 +300,7 @@ fn poke_tile(model: Model, coord: Coord) -> Model {
           reveal_adjacent_safe_tiles(board, c)
         })
 
-      let is_over = count_unchecked_non_bomb_tiles(new_board) == 0
+      let is_over = count_unchecked_safe_tiles(new_board) == 0
       let state = case is_over {
         True -> GameOver(won: True)
         False -> Playing
@@ -385,27 +353,30 @@ fn neighbors(c: Coord) {
 }
 
 fn reveal_adjacent_safe_tiles(board: Board, coord: Coord) -> Board {
-  case dict.get(board, coord) {
-    Ok(tile) -> {
-      case tile.status, tile.contents {
-        Unchecked, Empty(_) -> {
-          let new_tile = Tile(Checked, tile.contents)
-          let board = dict.insert(board, coord, new_tile)
+  let new_board = {
+    use tile <- result.try(dict.get(board, coord))
 
-          case neighbor_bomb_count(board, coord) {
-            0 ->
-              board
-              |> list.fold(over: neighbors(coord), with: fn(board, c) {
-                reveal_adjacent_safe_tiles(board, c)
-              })
-            _ -> board
-          }
+    let r = case tile.status, tile.contents {
+      Unchecked, Empty(_) -> {
+        let new_tile = Tile(Checked, tile.contents)
+        let board = dict.insert(board, coord, new_tile)
+
+        case neighbor_bomb_count(board, coord) {
+          0 ->
+            list.fold(
+              over: neighbors(coord),
+              from: board,
+              with: reveal_adjacent_safe_tiles,
+            )
+          _ -> board
         }
-        _, _ -> board
       }
+      _, _ -> board
     }
-    Error(_) -> board
+    Ok(r)
   }
+
+  result.unwrap(new_board, board)
 }
 
 fn flag_tile(model: Model, coord: Coord) -> Model {
@@ -420,7 +391,7 @@ fn flag_tile(model: Model, coord: Coord) -> Model {
   Game(..model, board: new_board)
 }
 
-fn count_unchecked_non_bomb_tiles(board: Board) -> Int {
+fn count_unchecked_safe_tiles(board: Board) -> Int {
   list.fold(over_board_coords(), from: 0, with: fn(acc, c) {
     let assert Ok(tile) = dict.get(board, c)
     case tile.status, tile.contents {
